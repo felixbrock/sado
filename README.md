@@ -20,15 +20,15 @@ The agent never receives elevated privileges. It only ever receives the output o
 
 ## Sado vs sudo
 
-|                       | sudo                                                              | sado                                                                          |
-| --------------------- | ----------------------------------------------------------------- | ----------------------------------------------------------------------------- |
-| **Decision basis**    | Static rules (`/etc/sudoers`)                                     | LLM judge + natural-language policy + full session context                    |
-| **Context awareness** | None                                                              | Sees conversation transcript, prior tool calls, session goal                  |
-| **Designed for**      | Human operators                                                   | AI agents                                                                     |
-| **Privilege model**   | Executes the command as root; requester receives output only      | Same — executes the command as root; requester receives output only           |
-| **Policy language**   | sudoers syntax                                                    | Plain Markdown                                                                |
-| **Transport**         | setuid binary, PAM                                                | Unix domain socket                                                            |
-| **Ambiguous cases**   | Denied unless explicitly allowed                                  | Judged against intent — a coherent session can unlock context-dependent rules |
+|                       | sudo                                                         | sado                                                                          |
+| --------------------- | ------------------------------------------------------------ | ----------------------------------------------------------------------------- |
+| **Decision basis**    | Static rules (`/etc/sudoers`)                                | LLM judge + natural-language policy + full session context                    |
+| **Context awareness** | None                                                         | Sees conversation transcript, prior tool calls, session goal                  |
+| **Designed for**      | Human operators                                              | AI agents                                                                     |
+| **Privilege model**   | Executes the command as root; requester receives output only | Same — executes the command as root; requester receives output only           |
+| **Policy language**   | sudoers syntax                                               | Plain Markdown                                                                |
+| **Transport**         | setuid binary, PAM                                           | Unix domain socket                                                            |
+| **Ambiguous cases**   | Denied unless explicitly allowed                             | Judged against intent — a coherent session can unlock context-dependent rules |
 
 The core difference: sudo asks _"is this user allowed to run this command?"_ Sado asks _"given everything happening in this session, should this command run right now?"_
 
@@ -75,6 +75,7 @@ The daemon maintains per-session decision history in memory, so the judge can re
 **1. Install**
 
 ```bash
+cd /path/to/sado
 sudo cp -r . /usr/local/lib/sado
 sudo python3 -m venv /usr/local/lib/sado/venv
 sudo /usr/local/lib/sado/venv/bin/pip install -r /usr/local/lib/sado/daemon/requirements.txt
@@ -85,8 +86,10 @@ sudo install -m 755 client/sado /usr/local/bin/sado
 
 ```bash
 sudo groupadd --system sado
-sudo usermod -aG sado <agent-username>
+sudo usermod -aG sado <agent-username>  # the OS user that runs the agent (e.g. your own username, or a dedicated agent account)
 ```
+
+> **Note:** Group membership changes take effect on the next login. To apply immediately without logging out, run `newgrp sado` in your current shell.
 
 **3. Configure the daemon**
 
@@ -133,10 +136,16 @@ In the agent's `.claude/settings.json`, add a PostToolUse hook to write per-sess
 
 **6. Set the socket path**
 
-Add to `/etc/environment` or the agent user's shell profile:
+Add to `/etc/environment`:
 
 ```bash
-export SADO_SOCKET=/run/sado/judge.sock
+echo 'SADO_SOCKET=/run/sado/judge.sock' | sudo tee -a /etc/environment
+```
+
+Or, for the agent user's shell profile only:
+
+```bash
+echo 'export SADO_SOCKET=/run/sado/judge.sock' >> ~/.bashrc
 ```
 
 That's it. Agents call `sado <command> [args...]` wherever they would otherwise need `sudo`. Session identity, transcript path, and tool history are all resolved automatically from `CLAUDE_SESSION_ID`.

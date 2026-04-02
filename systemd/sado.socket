@@ -1,0 +1,11 @@
+[Unit]
+Description=Sado privilege broker socket
+
+[Socket]
+ListenStream=/run/sado/judge.sock
+SocketMode=0660
+SocketGroup=sado
+DirectoryMode=0755
+
+[Install]
+WantedBy=sockets.target

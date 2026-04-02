@@ -1,0 +1,21 @@
+[Unit]
+Description=Sado privilege broker daemon
+Requires=sado.socket
+After=sado.socket
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/lib/sado/venv/bin/python -m daemon.main
+WorkingDirectory=/usr/local/lib/sado
+EnvironmentFile=/etc/sado/env
+Restart=on-failure
+RestartSec=5
+
+# Harden the service while still allowing it to run privileged commands
+NoNewPrivileges=no
+ProtectSystem=no
+PrivateTmp=no
+
+[Install]
+WantedBy=multi-user.target

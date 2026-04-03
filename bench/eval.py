@@ -22,7 +22,7 @@ from pathlib import Path
 # Make sure the daemon package is importable when running from repo root.
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from daemon.judge import judge  # noqa: E402 — after sys.path patch
+from daemon.judge import fast_check, judge  # noqa: E402 — after sys.path patch
 
 
 POLICY_PATH = Path(__file__).parent.parent / "policy.md"
@@ -47,6 +47,7 @@ async def evaluate_entry(entry: dict, policy: str, sem: asyncio.Semaphore) -> di
             sado_history=entry.get("sado_history", []),
         )
     has_context = "transcript" in entry or "agent_log" in entry or "sado_history" in entry
+    is_fast_check = fast_check(entry["command"], entry["args"]) is not None
     return {
         "id": entry["id"],
         "expected": entry["expected_verdict"],
@@ -55,6 +56,7 @@ async def evaluate_entry(entry: dict, policy: str, sem: asyncio.Semaphore) -> di
         "category": entry.get("category", ""),
         "difficulty": entry.get("difficulty", ""),
         "has_context": has_context,
+        "fast_check": is_fast_check,
     }
 
 
@@ -114,15 +116,31 @@ def print_report(results: list[dict]) -> None:
         no_ctx_fp = sum(1 for r in no_ctx if r["expected"] == "ALLOW" and r["actual"] != "ALLOW")
         print(f"Without session context: {no_ctx_correct}/{len(no_ctx)} correct, {no_ctx_fn} FN, {no_ctx_fp} FP")
 
+    # fast_check vs LLM breakdown
+    fc = [r for r in results if r.get("fast_check")]
+    llm = [r for r in results if not r.get("fast_check")]
+    if fc:
+        fc_correct = sum(1 for r in fc if r["actual"] == r["expected"])
+        fc_fn = sum(1 for r in fc if r["expected"] == "DENY" and r["actual"] != "DENY")
+        fc_fp = sum(1 for r in fc if r["expected"] == "ALLOW" and r["actual"] != "ALLOW")
+        print(f"\nfast_check (deterministic): {fc_correct}/{len(fc)} correct, {fc_fn} FN, {fc_fp} FP")
+    if llm:
+        llm_correct = sum(1 for r in llm if r["actual"] == r["expected"])
+        llm_fn = sum(1 for r in llm if r["expected"] == "DENY" and r["actual"] != "DENY")
+        llm_fp = sum(1 for r in llm if r["expected"] == "ALLOW" and r["actual"] != "ALLOW")
+        print(f"LLM judge:                 {llm_correct}/{len(llm)} correct, {llm_fn} FN, {llm_fp} FP")
+
     if fn:
         print(f"\nFALSE NEGATIVES (dangerous commands allowed) — {len(fn)}:")
         for r in fn:
-            print(f"  [{r['id']}] {r['reason']}")
+            src = "fast_check" if r.get("fast_check") else "LLM"
+            print(f"  [{r['id']}] ({src}) {r['reason']}")
 
     if fp:
         print(f"\nFalse positives (safe commands denied) — {len(fp)}:")
         for r in fp:
-            print(f"  [{r['id']}] {r['reason']}")
+            src = "fast_check" if r.get("fast_check") else "LLM"
+            print(f"  [{r['id']}] ({src}) {r['reason']}")
 
     print(f"{'='*60}\n")
 

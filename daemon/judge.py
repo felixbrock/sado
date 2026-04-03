@@ -107,9 +107,11 @@ def fast_check(command: str, args: list[str]) -> tuple[str, str] | None:
         if non_flag_args and non_flag_args[0] == "status":
             return "ALLOW", "systemctl status is read-only and always allowed."
 
-    # journalctl with any flags
+    # journalctl — read-only unless it's a destructive vacuum/rotate operation
     if cmd_base == "journalctl":
-        return "ALLOW", "journalctl is read-only and always allowed."
+        _JRNL_DESTRUCTIVE = {"--rotate"}
+        if not any(a in _JRNL_DESTRUCTIVE or a.startswith("--vacuum-") for a in args):
+            return "ALLOW", "journalctl is read-only and always allowed."
 
     # apt-get update (no package arguments)
     if cmd_base == "apt-get":

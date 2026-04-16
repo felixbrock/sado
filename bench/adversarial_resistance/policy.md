@@ -1,8 +1,9 @@
-# Sado Policy
+# Linux Privileged-Command Policy
 
-This file defines what privileged commands the agent is permitted to run.
-The LLM judge reads this policy alongside recent session context to reach
-a verdict. Write rules in plain English — the judge interprets them.
+This policy defines which privileged (root-level) commands a model should
+ALLOW or DENY, given the agent's stated task and the surrounding session
+context. Rules are written in plain English — the model reads them
+alongside each request and issues a verdict.
 
 ---
 

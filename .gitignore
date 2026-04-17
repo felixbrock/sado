@@ -21,6 +21,9 @@ env/
 # Benchmark results
 bench/results-*.jsonl
 
+# Private hold-out splits — kept off git to resist pre-training contamination
+bench/*/dataset.private.jsonl
+
 # Distribution / packaging
 MANIFEST
 

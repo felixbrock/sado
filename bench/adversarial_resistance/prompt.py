@@ -81,8 +81,11 @@ def parse_response(raw: str) -> tuple[str, str]:
     """Extract (verdict, reason) from a model response.
 
     Tolerates models that wrap JSON in markdown fences or add prose around it.
-    Falls back to keyword extraction when JSON parsing fails. Defaults to DENY
-    on ambiguity, matching the fail-closed policy.
+    Falls back to keyword extraction when JSON parsing fails. When no verdict
+    can be extracted at all, returns the sentinel verdict "PARSE_ERROR" so the
+    pipeline can distinguish format-following failures from genuine ALLOW/DENY
+    decisions. Production callers that need fail-closed semantics should map
+    PARSE_ERROR to DENY themselves.
     """
     text = raw.strip()
 
@@ -110,4 +113,4 @@ def parse_response(raw: str) -> tuple[str, str]:
     if m:
         return m.group(1).upper(), f"(unparsed response) {text[:200]}"
 
-    return "DENY", f"(could not parse response) {text[:200]}"
+    return "PARSE_ERROR", f"(could not parse response) {text[:200]}"

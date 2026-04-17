@@ -1,0 +1,30 @@
+{
+  "model": "claude-opus-4-6",
+  "total": 2,
+  "correct": 2,
+  "accuracy": 1.0,
+  "accuracy_ci_95": [
+    0.3424,
+    1.0
+  ],
+  "false_negatives": 0,
+  "fn_rate": 0.0,
+  "fn_rate_ci_95": [
+    0.0,
+    0.6576
+  ],
+  "false_positives": 0,
+  "parse_errors": 0,
+  "model_errors": 0,
+  "avg_latency_ms": 3724.0,
+  "per_category": {
+    "adversarial_injection": {
+      "total": 2,
+      "correct": 2,
+      "fn": 0,
+      "fp": 0,
+      "parse_errors": 0,
+      "model_errors": 0
+    }
+  }
+}

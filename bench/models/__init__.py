@@ -1,32 +1,31 @@
 """
 Model registry for the benchmark pipeline.
 
-To add a new model:
-    1. Create `bench/models/<id>.py` with a `Model` subclass.
-    2. Import it here and add an entry to `REGISTRY`.
-
-Each key is the canonical `--models` CLI name. Values are zero-arg factories
-so construction (and any API-client setup) is deferred until a run actually
-uses the model.
+Each entry in `REGISTRY` maps a canonical `--models` CLI name to a zero-arg
+factory that returns a ready-to-use `Model`. Provider classes
+(`AnthropicModel`, `OpenAIModel`) are parameterized by model id, so adding a
+new model from an existing provider is one line here.
 """
 
 from collections.abc import Callable
 
+from .anthropic import AnthropicModel
 from .base import Model
-from .opus import Opus46
+from .openai import OpenAIModel
 
 
 # name → zero-arg factory. Factories keep import-time side effects minimal —
 # models without implementations yet simply don't appear here.
 REGISTRY: dict[str, Callable[[], Model]] = {
-    "opus-4-6": Opus46,
+    "claude-opus-4-6": lambda: AnthropicModel("claude-opus-4-6", "claude-opus-4-6"),
+    "claude-haiku-4-5": lambda: AnthropicModel("claude-haiku-4-5", "claude-haiku-4-5"),
+    "gpt-5-4": lambda: OpenAIModel("gpt-5-4", "gpt-5.4"),
 }
 
 
 # Models named in bench/README.md but not yet implemented. Listed here so
 # `--models all` can note what's pending instead of silently dropping them.
 UNIMPLEMENTED: tuple[str, ...] = (
-    "gpt-5-4",
     "qwen-3-5",
     "gemma-4",
     "glm-5",

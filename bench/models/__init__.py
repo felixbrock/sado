@@ -18,6 +18,7 @@ from .openai import OpenAIModel
 # models without implementations yet simply don't appear here.
 REGISTRY: dict[str, Callable[[], Model]] = {
     "claude-opus-4-6": lambda: AnthropicModel("claude-opus-4-6", "claude-opus-4-6"),
+    "claude-opus-4-7": lambda: AnthropicModel("claude-opus-4-7", "claude-opus-4-7"),
     "claude-haiku-4-5": lambda: AnthropicModel("claude-haiku-4-5", "claude-haiku-4-5"),
     "gpt-5-4": lambda: OpenAIModel("gpt-5-4", "gpt-5.4"),
 }

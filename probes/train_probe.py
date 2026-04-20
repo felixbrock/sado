@@ -218,6 +218,55 @@ def sweep_layers_pools(splits: dict, top_k: int = 10) -> list[dict]:
     return configs
 
 
+def category_breakdown(
+    splits: dict,
+    bench_path: Path,
+    configs: list[tuple[str, int, str]],
+) -> None:
+    """Report FN/FP broken down by bench `category`. The point is to detect
+    domain shortcuts: if the probe does great on jailbreak-flavored DENY but
+    poorly on plain-prose DENY, it learned text-style not policy-semantics.
+    """
+    from sklearn.linear_model import LogisticRegression
+
+    id_to_cat: dict[str, str] = {}
+    for line in bench_path.read_text().splitlines():
+        if not line.strip():
+            continue
+        r = json.loads(line)
+        id_to_cat[r["id"]] = r.get("category", "unknown")
+
+    pool_modes = splits["train"]["meta"]["pool_modes"]
+    y_tr = splits["train"]["labels"].numpy()
+    y_te = splits["test"]["labels"].numpy()
+    test_cats = np.array([id_to_cat.get(i, "unknown") for i in splits["test"]["ids"]])
+
+    for name, layer, pool_name in configs:
+        p_idx = pool_modes.index(pool_name)
+        X_tr = splits["train"]["hidden_all"][:, layer, p_idx, :].float().numpy()
+        X_te = splits["test"]["hidden_all"][:, layer, p_idx, :].float().numpy()
+        clf = LogisticRegression(C=1.0, class_weight="balanced", max_iter=2000)
+        clf.fit(X_tr, y_tr)
+        preds = clf.predict(X_te)
+
+        print(f"\n--- category breakdown: {name} (layer={layer}, pool={pool_name}) ---")
+        print(f"{'category':24s}  {'n':>4}  {'n_deny':>7}  {'fn':>4}  {'fn_rate':>8}  {'fp':>3}  {'fp_rate':>8}")
+        for cat in sorted(set(test_cats)):
+            m = test_cats == cat
+            y = y_te[m]
+            p = preds[m]
+            n_deny = int((y == 1).sum())
+            n_allow = int((y == 0).sum())
+            fn = int(((p == 0) & (y == 1)).sum())
+            fp = int(((p == 1) & (y == 0)).sum())
+            fn_rate = fn / max(n_deny, 1)
+            fp_rate = fp / max(n_allow, 1)
+            print(
+                f"{cat:24s}  {int(m.sum()):>4}  {n_deny:>7}  {fn:>4}  "
+                f"{fn_rate:>8.3f}  {fp:>3}  {fp_rate:>8.3f}"
+            )
+
+
 def logreg_probe(splits: dict, layer_key: str) -> dict:
     """Probe of record: sklearn LogReg with class_weight='balanced'."""
     from sklearn.linear_model import LogisticRegression
@@ -345,6 +394,18 @@ def main() -> None:
             delta = sh["bow_plus_activ_val"] - sh["bow_only_val"]
             verdict = "adds signal" if delta > 0.005 else "redundant w/ BoW"
             print(f"  -> val delta (combined - bow): {delta:+.3f}  ({verdict})")
+
+    if "hidden_all" in splits["train"]:
+        print(f"\n=== Category breakdown (domain-shortcut check) ===")
+        category_breakdown(
+            splits,
+            Path(args.bench_data),
+            configs=[
+                ("L18 mean (old baseline)", 18, "mean"),
+                ("L19 max (sweep winner)", 19, "max"),
+                ("L9 last_token (runner-up)", 9, "last_token"),
+            ],
+        )
 
     if args.sweep:
         if "hidden_all" not in splits["train"]:

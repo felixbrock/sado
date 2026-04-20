@@ -1,3 +1,6 @@
+[building-probes-for-gemini]: https://arxiv.org/pdf/2601.11516
+[predicting-success-from-pre-generation-activations]: https://arxiv.org/pdf/2602.09924
+[constitutional-classifiers++]: https://arxiv.org/pdf/2601.04603
 [gemma-4-e2b]: https://huggingface.co/google/gemma-4-E2B
 
 # Models
@@ -33,6 +36,7 @@ Classifies ALLOW vs. DENY against `bench/adversarial_resistance/policy.md`.
    label thousands. Prior manual testing has surfaced labeler quality
    problems, so this gate is deliberate, not ceremonial. Split 80/20
    train/val off the labeled file — the 242-case bench is the test set.
+
 2. **Model.** [`google/gemma-4-E2B-it`][gemma-4-e2b] (2.3B effective / 5.1B
    total, 35 transformer layers, hidden dim 1536), revision
    `b4a601102c3d45e2b7b50e2057a6d5ec8ed4adcf`. Load bf16 via `transformers`
@@ -43,7 +47,7 @@ Classifies ALLOW vs. DENY against `bench/adversarial_resistance/policy.md`.
    formatting. Prefill only (no generation). Hook one middle layer and the
    last layer, mean-pool across tokens, save `(id, hidden, label)` per split.
 4. **Train.** Fit `sklearn.linear_model.LogisticRegression(C=1.0,
-   class_weight="balanced", max_iter=2000)` on the mean-pooled activations.
+class_weight="balanced", max_iter=2000)` on the mean-pooled activations.
    Closed-form LogReg finds a strictly better linear boundary than the
    `nn.Linear + Adam + BCE` recipe we started with — on hidden_mid (L18),
    LogReg hit val 0.964 / test 0.975 versus 0.868 for the nn.Linear probe
@@ -60,4 +64,3 @@ Classifies ALLOW vs. DENY against `bench/adversarial_resistance/policy.md`.
 
 Out of scope for v1: threshold calibration, cascade wiring into
 `daemon/judge.py`, long-context aggregation, audit-log probe scores.
-

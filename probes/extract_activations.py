@@ -30,6 +30,7 @@ MODEL_DIR = "/workspace/models/gemma-4-E2B-it"
 REVISION = "b4a601102c3d45e2b7b50e2057a6d5ec8ed4adcf"
 MIDDLE_LAYER = 18
 LAST_LAYER = 35
+POOL_MODES = ("mean", "last_token", "max")
 DEVICE = "cuda:0"
 MAX_TOKENS = 8192
 
@@ -58,17 +59,22 @@ def stratified_split(rows: list[dict], seed: int, val_frac: float) -> tuple[list
 
 
 @torch.inference_mode()
-def extract_one(model, tok, text: str) -> tuple[torch.Tensor, torch.Tensor]:
+def extract_one(model, tok, text: str) -> torch.Tensor:
+    """Return pooled activations of shape (num_layers, num_pool_modes, hidden_dim), bf16."""
     inputs = tok(text, return_tensors="pt", truncation=True, max_length=MAX_TOKENS).to(DEVICE)
     out = model(**inputs, output_hidden_states=True, use_cache=False)
-    mask = inputs["attention_mask"].unsqueeze(-1).float()
+    mask = inputs["attention_mask"].float()           # (1, S)
+    mask_u = mask.unsqueeze(-1)                       # (1, S, 1)
+    last_idx = int(mask.sum(dim=1).item()) - 1
 
-    def pool(h: torch.Tensor) -> torch.Tensor:
-        return (h.float() * mask).sum(dim=1) / mask.sum(dim=1)
-
-    mid = pool(out.hidden_states[MIDDLE_LAYER]).squeeze(0).to(torch.bfloat16).cpu()
-    last = pool(out.hidden_states[LAST_LAYER]).squeeze(0).to(torch.bfloat16).cpu()
-    return mid, last
+    per_layer: list[torch.Tensor] = []
+    for h in out.hidden_states:                       # tuple of (1, S, H)
+        h32 = h.float()
+        mean_p = ((h32 * mask_u).sum(dim=1) / mask_u.sum(dim=1)).squeeze(0)
+        last_p = h32[0, last_idx]
+        max_p = h32.masked_fill(mask_u == 0, float("-inf")).max(dim=1).values.squeeze(0)
+        per_layer.append(torch.stack([mean_p, last_p, max_p], dim=0))  # (3, H)
+    return torch.stack(per_layer, dim=0).to(torch.bfloat16).cpu()      # (L, 3, H)
 
 
 def label_for(verdict: str) -> int:
@@ -76,23 +82,26 @@ def label_for(verdict: str) -> int:
 
 
 def extract_split(model, tok, rows: list[dict], label_key: str) -> dict:
-    ids, labels, mid_list, last_list = [], [], [], []
+    ids, labels, act_list = [], [], []
     t0 = time.perf_counter()
     for i, r in enumerate(rows):
-        mid, last = extract_one(model, tok, build_prompt(r))
+        act = extract_one(model, tok, build_prompt(r))  # (L, 3, H)
         ids.append(r["id"])
         labels.append(label_for(r[label_key]))
-        mid_list.append(mid)
-        last_list.append(last)
+        act_list.append(act)
         if (i + 1) % 100 == 0:
             rate = (i + 1) / (time.perf_counter() - t0)
             eta_m = (len(rows) - i - 1) / rate / 60
             print(f"  {i+1}/{len(rows)}  {rate:.2f} prompts/s  eta {eta_m:.1f}m", flush=True)
+    hidden_all = torch.stack(act_list)  # (N, L, 3, H)
+    mean_idx = POOL_MODES.index("mean")
     return {
         "ids": ids,
         "labels": torch.tensor(labels, dtype=torch.int8),
-        "hidden_mid": torch.stack(mid_list),
-        "hidden_last": torch.stack(last_list),
+        "hidden_all": hidden_all,
+        # Back-compat: mean-pooled views for the existing probe-of-record path.
+        "hidden_mid": hidden_all[:, MIDDLE_LAYER, mean_idx].contiguous(),
+        "hidden_last": hidden_all[:, LAST_LAYER, mean_idx].contiguous(),
     }
 
 
@@ -141,7 +150,8 @@ def main() -> None:
         "model_revision": REVISION,
         "middle_layer": MIDDLE_LAYER,
         "last_layer": LAST_LAYER,
-        "pooling": "mean_masked_bf16",
+        "pool_modes": list(POOL_MODES),
+        "hidden_all_axes": "(N, num_layers_incl_embedding, num_pools, hidden_dim)",
         "transformers_version": transformers.__version__,
         "torch_version": torch.__version__,
         "split_seed": args.seed,
@@ -161,7 +171,7 @@ def main() -> None:
         data["meta"] = {**meta, "split": name, "n_rows": len(rows)}
         out_path = out_dir / f"{name}.pt"
         torch.save(data, out_path)
-        print(f"  saved -> {out_path}  hidden_mid {tuple(data['hidden_mid'].shape)}")
+        print(f"  saved -> {out_path}  hidden_all {tuple(data['hidden_all'].shape)}")
 
 
 if __name__ == "__main__":

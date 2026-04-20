@@ -176,6 +176,48 @@ def _build_texts(splits: dict, labeled_path: Path, bench_path: Path) -> dict:
     }
 
 
+def sweep_layers_pools(splits: dict, top_k: int = 10) -> list[dict]:
+    """Fit a balanced-LogReg probe for each (layer, pool) combination on
+    hidden_all of shape (N, L, P, H). Rank by val acc. Return the full list
+    with test metrics filled in for the top_k val-ranked configs.
+    """
+    from sklearn.linear_model import LogisticRegression
+
+    H_tr = splits["train"]["hidden_all"].float().numpy()   # (N, L, P, H)
+    H_va = splits["val"]["hidden_all"].float().numpy()
+    H_te = splits["test"]["hidden_all"].float().numpy()
+    y_tr = splits["train"]["labels"].numpy()
+    y_va = splits["val"]["labels"].numpy()
+    y_te = splits["test"]["labels"].numpy()
+
+    pool_modes = splits["train"]["meta"]["pool_modes"]
+    num_layers, num_pools = H_tr.shape[1], H_tr.shape[2]
+
+    configs: list[dict] = []
+    for layer in range(num_layers):
+        for p_idx, p_name in enumerate(pool_modes):
+            X_tr = H_tr[:, layer, p_idx, :]
+            X_va = H_va[:, layer, p_idx, :]
+            clf = LogisticRegression(C=1.0, class_weight="balanced", max_iter=2000)
+            clf.fit(X_tr, y_tr)
+            configs.append(
+                {
+                    "layer": layer,
+                    "pool": p_name,
+                    "clf": clf,
+                    "val": _metrics_from_preds(clf.predict(X_va), y_va),
+                }
+            )
+
+    configs.sort(key=lambda c: c["val"]["acc"], reverse=True)
+
+    # Evaluate top_k on test.
+    for c in configs[:top_k]:
+        X_te = H_te[:, c["layer"], pool_modes.index(c["pool"]), :]
+        c["test"] = _metrics_from_preds(c["clf"].predict(X_te), y_te)
+    return configs
+
+
 def logreg_probe(splits: dict, layer_key: str) -> dict:
     """Probe of record: sklearn LogReg with class_weight='balanced'."""
     from sklearn.linear_model import LogisticRegression
@@ -248,6 +290,7 @@ def main() -> None:
     ap.add_argument("--labeled-data", default="probes/dataset_labeled.jsonl")
     ap.add_argument("--bench-data", default="bench/adversarial_resistance/dataset.jsonl")
     ap.add_argument("--skip-bow", action="store_true")
+    ap.add_argument("--sweep", action="store_true", help="run layer x pool sweep (requires hidden_all in .pt files)")
     args = ap.parse_args()
 
     root = Path(args.activations_dir)
@@ -302,6 +345,23 @@ def main() -> None:
             delta = sh["bow_plus_activ_val"] - sh["bow_only_val"]
             verdict = "adds signal" if delta > 0.005 else "redundant w/ BoW"
             print(f"  -> val delta (combined - bow): {delta:+.3f}  ({verdict})")
+
+    if args.sweep:
+        if "hidden_all" not in splits["train"]:
+            print("\n--sweep requested but hidden_all not in train.pt; re-extract activations first.")
+            return
+        print(f"\n=== Layer x Pool sweep (LogReg, class_weight=balanced) ===")
+        configs = sweep_layers_pools(splits, top_k=10)
+        print(f"{'rank':>4}  {'layer':>5}  {'pool':>11}  {'val_acc':>7}  {'test_acc':>8}  {'test_fn':>7}  {'test_fp':>7}")
+        for i, c in enumerate(configs[:10], start=1):
+            t = c.get("test", {})
+            print(
+                f"{i:>4}  {c['layer']:>5}  {c['pool']:>11}  "
+                f"{c['val']['acc']:>7.3f}  "
+                f"{t.get('acc', float('nan')):>8.3f}  "
+                f"{t.get('fn_rate', float('nan')):>7.3f}  "
+                f"{t.get('fp_rate', float('nan')):>7.3f}"
+            )
 
 
 if __name__ == "__main__":

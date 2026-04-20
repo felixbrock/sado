@@ -104,6 +104,13 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--val-frac", type=float, default=0.2)
     ap.add_argument("--limit", type=int, default=None, help="debug: cap rows per split")
+    ap.add_argument(
+        "--splits",
+        nargs="+",
+        choices=["train", "val", "test"],
+        default=["train", "val", "test"],
+        help="which splits to (re-)extract",
+    )
     args = ap.parse_args()
 
     out_dir = Path(args.out_dir)
@@ -146,6 +153,9 @@ def main() -> None:
         ("val", val_rows, "verdict"),
         ("test", test_rows, "expected_verdict"),
     ]:
+        if name not in args.splits:
+            print(f"=== skipping {name} (not in --splits) ===")
+            continue
         print(f"=== extracting {name} ({len(rows)} rows) ===")
         data = extract_split(model, tok, rows, label_key)
         data["meta"] = {**meta, "split": name, "n_rows": len(rows)}

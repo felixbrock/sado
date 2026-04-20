@@ -141,18 +141,16 @@ def summarize(results: list[dict]) -> dict:
         "test_acc": (col("test", "acc").mean(), col("test", "acc").std()),
         "test_fn_rate": (col("test", "fn_rate").mean(), col("test", "fn_rate").std()),
         "test_fn_wilson": (col("test", "fn_wilson_ub").mean(), col("test", "fn_wilson_ub").std()),
+        "test_fp_rate": (col("test", "fp_rate").mean(), col("test", "fp_rate").std()),
     }
 
 
-def bow_baseline(splits: dict, labeled_path: Path, bench_path: Path) -> tuple[float, float]:
-    from sklearn.feature_extraction.text import TfidfVectorizer
-    from sklearn.linear_model import LogisticRegression
-
+def _build_texts(splits: dict, labeled_path: Path, bench_path: Path) -> dict:
     def load(p: Path) -> dict:
         return {
-            json.loads(l)["id"]: json.loads(l)
-            for l in p.read_text().splitlines()
-            if l.strip()
+            json.loads(line)["id"]: json.loads(line)
+            for line in p.read_text().splitlines()
+            if line.strip()
         }
 
     labeled = load(labeled_path)
@@ -162,20 +160,57 @@ def bow_baseline(splits: dict, labeled_path: Path, bench_path: Path) -> tuple[fl
         r = src[rid]
         return f"{r.get('command', '')} {' '.join(r.get('args', []))} {r.get('goal', '')}"
 
-    Xtr_t = [text_for(i, labeled) for i in splits["train"]["ids"]]
-    Xva_t = [text_for(i, labeled) for i in splits["val"]["ids"]]
-    Xte_t = [text_for(i, bench) for i in splits["test"]["ids"]]
+    return {
+        "train": [text_for(i, labeled) for i in splits["train"]["ids"]],
+        "val": [text_for(i, labeled) for i in splits["val"]["ids"]],
+        "test": [text_for(i, bench) for i in splits["test"]["ids"]],
+    }
+
+
+def shortcut_analysis(
+    splits: dict, texts: dict, layer_key: str
+) -> dict[str, float]:
+    """Compare LogReg on BoW / activation / [BoW || activation].
+
+    If [BoW || activation] doesn't beat BoW alone on val, activations add
+    nothing beyond surface n-grams and this model/layer is the wrong lever.
+    """
+    from scipy.sparse import csr_matrix, hstack
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    from sklearn.linear_model import LogisticRegression
 
     vec = TfidfVectorizer(ngram_range=(1, 2), min_df=2, max_features=20000)
-    Xtr = vec.fit_transform(Xtr_t)
-    Xva = vec.transform(Xva_t)
-    Xte = vec.transform(Xte_t)
+    Xtr_t = vec.fit_transform(texts["train"])
+    Xva_t = vec.transform(texts["val"])
+    Xte_t = vec.transform(texts["test"])
 
-    clf = LogisticRegression(max_iter=1000, C=1.0, class_weight="balanced")
-    clf.fit(Xtr, splits["train"]["labels"].numpy())
-    return clf.score(Xva, splits["val"]["labels"].numpy()), clf.score(
-        Xte, splits["test"]["labels"].numpy()
-    )
+    Xtr_h = splits["train"][layer_key].float().numpy()
+    Xva_h = splits["val"][layer_key].float().numpy()
+    Xte_h = splits["test"][layer_key].float().numpy()
+
+    Xtr_c = hstack([csr_matrix(Xtr_h), Xtr_t]).tocsr()
+    Xva_c = hstack([csr_matrix(Xva_h), Xva_t]).tocsr()
+    Xte_c = hstack([csr_matrix(Xte_h), Xte_t]).tocsr()
+
+    y_tr = splits["train"]["labels"].numpy()
+    y_va = splits["val"]["labels"].numpy()
+    y_te = splits["test"]["labels"].numpy()
+
+    def fit_eval(Xtr, Xva, Xte) -> tuple[float, float]:
+        clf = LogisticRegression(max_iter=2000, C=1.0, class_weight="balanced")
+        clf.fit(Xtr, y_tr)
+        return clf.score(Xva, y_va), clf.score(Xte, y_te)
+
+    out: dict[str, float] = {}
+    for name, Xtr, Xva, Xte in [
+        ("bow_only", Xtr_t, Xva_t, Xte_t),
+        ("activ_only", Xtr_h, Xva_h, Xte_h),
+        ("bow_plus_activ", Xtr_c, Xva_c, Xte_c),
+    ]:
+        va, te = fit_eval(Xtr, Xva, Xte)
+        out[f"{name}_val"] = va
+        out[f"{name}_test"] = te
+    return out
 
 
 def main() -> None:
@@ -208,11 +243,11 @@ def main() -> None:
     print(f"val majority class    : class={maj}  acc={maj_acc:.3f}")
     print(f"test DENY prior       : {n_deny_te}/{n_te} = {n_deny_te/n_te:.3f}")
 
-    if not args.skip_bow:
-        bow_va, bow_te = bow_baseline(
-            splits, Path(args.labeled_data), Path(args.bench_data)
-        )
-        print(f"BoW TF-IDF + LogReg   : val_acc={bow_va:.3f}  test_acc={bow_te:.3f}")
+    texts = (
+        None
+        if args.skip_bow
+        else _build_texts(splits, Path(args.labeled_data), Path(args.bench_data))
+    )
 
     for layer_key in ("hidden_mid", "hidden_last"):
         print(f"\n=== Probe: {layer_key} ({args.seeds} seeds) ===")
@@ -222,7 +257,18 @@ def main() -> None:
         print(f"test acc       : {s['test_acc'][0]:.3f} +/- {s['test_acc'][1]:.3f}")
         print(f"test FN-rate   : {s['test_fn_rate'][0]:.3f} +/- {s['test_fn_rate'][1]:.3f}")
         print(f"test FN Wilson : {s['test_fn_wilson'][0]:.3f} +/- {s['test_fn_wilson'][1]:.3f}")
+        print(f"test FP-rate   : {s['test_fp_rate'][0]:.3f} +/- {s['test_fp_rate'][1]:.3f}")
         print(f"shuffled-label : test_acc={shuf['acc']:.3f} (should be ~{maj_acc:.2f})")
+
+        if texts is not None:
+            sh = shortcut_analysis(splits, texts, layer_key)
+            print(f"  -- shortcut analysis (LogReg, same classifier, fair compare) --")
+            print(f"  BoW only          : val={sh['bow_only_val']:.3f}  test={sh['bow_only_test']:.3f}")
+            print(f"  Activation only   : val={sh['activ_only_val']:.3f}  test={sh['activ_only_test']:.3f}")
+            print(f"  BoW || Activation : val={sh['bow_plus_activ_val']:.3f}  test={sh['bow_plus_activ_test']:.3f}")
+            delta = sh["bow_plus_activ_val"] - sh["bow_only_val"]
+            verdict = "adds signal" if delta > 0.005 else "redundant w/ BoW"
+            print(f"  -> val delta (combined - bow): {delta:+.3f}  ({verdict})")
 
 
 if __name__ == "__main__":

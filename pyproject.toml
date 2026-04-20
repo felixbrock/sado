@@ -4,6 +4,22 @@ version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
     "anthropic>=0.96.0",
+    "datasets>=4.8.4",
     "openai>=2.32.0",
     "python-dotenv>=1.2.2",
 ]
+
+[dependency-groups]
+probes = [
+    "torch>=2.4",
+    "numpy>=1.26",
+    "scikit-learn>=1.4",
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }

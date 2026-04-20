@@ -1,0 +1,229 @@
+"""
+Train the linear probe (README step 4) + sanity checks (step 6).
+
+Loads activations from `probes/activations/{train,val,test}.pt`, trains a
+1536->1 linear head with BCE + Adam + early stopping on val loss across
+10 seeds, and reports mean +/- std of val acc / test acc / test FN-rate
+(with Wilson upper bound). Also runs:
+  - majority-class val baseline
+  - shuffled-label control (should collapse to ~majority)
+  - TF-IDF bag-of-words + LogReg baseline on the raw (command + goal) text
+"""
+import argparse
+import json
+import math
+from pathlib import Path
+
+import numpy as np
+import torch
+from torch import nn
+
+
+def wilson_upper(k: int, n: int, z: float = 1.96) -> float:
+    if n == 0:
+        return 1.0
+    p = k / n
+    denom = 1 + z * z / n
+    centre = (p + z * z / (2 * n)) / denom
+    half = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / denom
+    return centre + half
+
+
+def train_one(
+    X_tr: torch.Tensor,
+    y_tr: torch.Tensor,
+    X_va: torch.Tensor,
+    y_va: torch.Tensor,
+    seed: int,
+    *,
+    patience: int = 5,
+    max_epochs: int = 30,
+    lr: float = 1e-3,
+    bs: int = 64,
+) -> tuple[nn.Linear, float]:
+    torch.manual_seed(seed)
+    d = X_tr.shape[1]
+    model = nn.Linear(d, 1)
+    opt = torch.optim.Adam(model.parameters(), lr=lr)
+    bce = nn.BCEWithLogitsLoss()
+
+    best_loss = float("inf")
+    best_state = {k: v.clone() for k, v in model.state_dict().items()}
+    bad = 0
+
+    for _ in range(max_epochs):
+        perm = torch.randperm(len(X_tr))
+        model.train()
+        for i in range(0, len(X_tr), bs):
+            idx = perm[i : i + bs]
+            logits = model(X_tr[idx]).squeeze(-1)
+            loss = bce(logits, y_tr[idx].float())
+            opt.zero_grad()
+            loss.backward()
+            opt.step()
+
+        model.eval()
+        with torch.no_grad():
+            val_loss = bce(model(X_va).squeeze(-1), y_va.float()).item()
+        if val_loss < best_loss - 1e-6:
+            best_loss = val_loss
+            best_state = {k: v.clone() for k, v in model.state_dict().items()}
+            bad = 0
+        else:
+            bad += 1
+            if bad >= patience:
+                break
+
+    model.load_state_dict(best_state)
+    return model, best_loss
+
+
+def compute_metrics(model: nn.Linear, X: torch.Tensor, y: torch.Tensor) -> dict:
+    model.eval()
+    with torch.no_grad():
+        preds = (model(X).squeeze(-1) > 0).int()
+    y = y.int()
+    acc = (preds == y).float().mean().item()
+    deny = y == 1
+    n_deny = int(deny.sum().item())
+    fn = int(((preds == 0) & deny).sum().item())
+    allow = y == 0
+    n_allow = int(allow.sum().item())
+    fp = int(((preds == 1) & allow).sum().item())
+    return {
+        "acc": acc,
+        "fn": fn,
+        "n_deny": n_deny,
+        "fn_rate": fn / max(n_deny, 1),
+        "fn_wilson_ub": wilson_upper(fn, n_deny),
+        "fp": fp,
+        "n_allow": n_allow,
+        "fp_rate": fp / max(n_allow, 1),
+    }
+
+
+def run_layer(
+    splits: dict, layer_key: str, n_seeds: int
+) -> tuple[list[dict], dict]:
+    X_tr = splits["train"][layer_key].float()
+    y_tr = splits["train"]["labels"].long()
+    X_va = splits["val"][layer_key].float()
+    y_va = splits["val"]["labels"].long()
+    X_te = splits["test"][layer_key].float()
+    y_te = splits["test"]["labels"].long()
+
+    results = []
+    for seed in range(n_seeds):
+        model, val_loss = train_one(X_tr, y_tr, X_va, y_va, seed)
+        results.append(
+            {
+                "seed": seed,
+                "val_loss": val_loss,
+                "val": compute_metrics(model, X_va, y_va),
+                "test": compute_metrics(model, X_te, y_te),
+            }
+        )
+
+    g = torch.Generator().manual_seed(9999)
+    y_shuf = y_tr[torch.randperm(len(y_tr), generator=g)]
+    model_shuf, _ = train_one(X_tr, y_shuf, X_va, y_va, seed=9999)
+    shuf_metrics = compute_metrics(model_shuf, X_te, y_te)
+
+    return results, shuf_metrics
+
+
+def summarize(results: list[dict]) -> dict:
+    def col(split: str, key: str) -> np.ndarray:
+        return np.array([r[split][key] for r in results])
+
+    return {
+        "val_acc": (col("val", "acc").mean(), col("val", "acc").std()),
+        "test_acc": (col("test", "acc").mean(), col("test", "acc").std()),
+        "test_fn_rate": (col("test", "fn_rate").mean(), col("test", "fn_rate").std()),
+        "test_fn_wilson": (col("test", "fn_wilson_ub").mean(), col("test", "fn_wilson_ub").std()),
+    }
+
+
+def bow_baseline(splits: dict, labeled_path: Path, bench_path: Path) -> tuple[float, float]:
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    from sklearn.linear_model import LogisticRegression
+
+    def load(p: Path) -> dict:
+        return {
+            json.loads(l)["id"]: json.loads(l)
+            for l in p.read_text().splitlines()
+            if l.strip()
+        }
+
+    labeled = load(labeled_path)
+    bench = load(bench_path)
+
+    def text_for(rid: str, src: dict) -> str:
+        r = src[rid]
+        return f"{r.get('command', '')} {' '.join(r.get('args', []))} {r.get('goal', '')}"
+
+    Xtr_t = [text_for(i, labeled) for i in splits["train"]["ids"]]
+    Xva_t = [text_for(i, labeled) for i in splits["val"]["ids"]]
+    Xte_t = [text_for(i, bench) for i in splits["test"]["ids"]]
+
+    vec = TfidfVectorizer(ngram_range=(1, 2), min_df=2, max_features=20000)
+    Xtr = vec.fit_transform(Xtr_t)
+    Xva = vec.transform(Xva_t)
+    Xte = vec.transform(Xte_t)
+
+    clf = LogisticRegression(max_iter=1000, C=1.0, class_weight="balanced")
+    clf.fit(Xtr, splits["train"]["labels"].numpy())
+    return clf.score(Xva, splits["val"]["labels"].numpy()), clf.score(
+        Xte, splits["test"]["labels"].numpy()
+    )
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--activations-dir", default="probes/activations")
+    ap.add_argument("--seeds", type=int, default=10)
+    ap.add_argument("--labeled-data", default="probes/dataset_labeled.jsonl")
+    ap.add_argument("--bench-data", default="bench/adversarial_resistance/dataset.jsonl")
+    ap.add_argument("--skip-bow", action="store_true")
+    args = ap.parse_args()
+
+    root = Path(args.activations_dir)
+    splits = {
+        name: torch.load(root / f"{name}.pt", weights_only=False)
+        for name in ("train", "val", "test")
+    }
+    n_tr = len(splits["train"]["labels"])
+    n_va = len(splits["val"]["labels"])
+    n_te = len(splits["test"]["labels"])
+    print(f"train={n_tr}  val={n_va}  test={n_te}")
+    print(f"model revision: {splits['train']['meta']['model_revision']}")
+
+    y_va = splits["val"]["labels"]
+    maj = int((y_va == 1).sum() > (y_va == 0).sum())
+    maj_acc = float((y_va == maj).float().mean())
+
+    y_te = splits["test"]["labels"]
+    n_deny_te = int((y_te == 1).sum().item())
+    print(f"\n=== Baselines ===")
+    print(f"val majority class    : class={maj}  acc={maj_acc:.3f}")
+    print(f"test DENY prior       : {n_deny_te}/{n_te} = {n_deny_te/n_te:.3f}")
+
+    if not args.skip_bow:
+        bow_va, bow_te = bow_baseline(
+            splits, Path(args.labeled_data), Path(args.bench_data)
+        )
+        print(f"BoW TF-IDF + LogReg   : val_acc={bow_va:.3f}  test_acc={bow_te:.3f}")
+
+    for layer_key in ("hidden_mid", "hidden_last"):
+        print(f"\n=== Probe: {layer_key} ({args.seeds} seeds) ===")
+        results, shuf = run_layer(splits, layer_key, args.seeds)
+        s = summarize(results)
+        print(f"val  acc       : {s['val_acc'][0]:.3f} +/- {s['val_acc'][1]:.3f}")
+        print(f"test acc       : {s['test_acc'][0]:.3f} +/- {s['test_acc'][1]:.3f}")
+        print(f"test FN-rate   : {s['test_fn_rate'][0]:.3f} +/- {s['test_fn_rate'][1]:.3f}")
+        print(f"test FN Wilson : {s['test_fn_wilson'][0]:.3f} +/- {s['test_fn_wilson'][1]:.3f}")
+        print(f"shuffled-label : test_acc={shuf['acc']:.3f} (should be ~{maj_acc:.2f})")
+
+
+if __name__ == "__main__":
+    main()

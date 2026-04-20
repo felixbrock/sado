@@ -27,7 +27,14 @@ import json
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+from dotenv import load_dotenv
+
+BENCH_ROOT = Path(__file__).parent.parent
+sys.path.insert(0, str(BENCH_ROOT.parent))
+
+# Match pipeline.py: load bench/.env before constructing model adapters so the
+# SDK clients see ANTHROPIC_API_KEY etc. at construction time.
+load_dotenv(BENCH_ROOT / ".env")
 
 from bench import models as model_registry  # noqa: E402
 

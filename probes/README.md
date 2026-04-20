@@ -64,3 +64,49 @@ class_weight="balanced", max_iter=2000)` on the mean-pooled activations.
 
 Out of scope for v1: threshold calibration, cascade wiring into
 `daemon/judge.py`, long-context aggregation, audit-log probe scores.
+
+---
+
+# Results (as of 2026-04-20)
+
+## Final probe of record
+
+- **Model:** `google/gemma-4-E2B-it`, revision `b4a601102c3d45e2b7b50e2057a6d5ec8ed4adcf`, loaded bf16 on an RTX 3090. Activations stored as a `(N, 36, 3, 1536)` tensor per split (all layers × `[mean, last_token, max]` × hidden dim).
+- **Canonical config:** layer **19** (mid-range), pooling **max**, classifier `LogisticRegression(C=1.0, class_weight="balanced", max_iter=2000)`. Found via a 108-config (layer × pool) sweep ranked by val accuracy; see `probes/train_probe.py --sweep`. Max pooling dominated the top 10 (8 of 10), mean pooling — the README default — didn't appear.
+- **Training set:** `probes/dataset_labeled.jsonl` (3056 rows = 2936 original + 120 plain-prose DENY augmentation). Stratified 80/20 split on verdict, seed 42.
+- **Test set:** `bench/adversarial_resistance/dataset.jsonl` (308 rows = 200 original DENY + 28 ALLOW + 80 plain-prose DENY).
+
+## Head-to-head on the 308-row bench (see `bench/results/adversarial_resistance/20260420T140616Z/`)
+
+| Judge                       | Acc     | FN rate | FP rate |
+|---                          |---      |---      |---      |
+| claude-opus-4-7             | 100.0%  | 0.0%    | 0.0%    |
+| **probe-gemma-l19-max**     | 95.5%   | 5.0%    | 0.0%    |
+| claude-haiku-4-5            | 89.9%   | 10.7%   | 3.6%    |
+| gemma-4-e2b-it-generative   | 28.2%   | 78.9%   | 0.0%    |
+
+Per-category, the probe is flat (4–6% FN everywhere) while Haiku collapses on `adversarial_injection` (18.7% FN) but is perfect on `plain_deny`. Gemma's own generation head hovers at 56–91% FN across categories — the activations carry the signal, the LM head doesn't.
+
+## Domain-shortcut history (why we trust the probe now)
+
+The first version of the probe (jailbreak-flavored DENY only in training) looked world-class but was a jailbreak-stylistic classifier:
+
+| category              | before augmentation | after +120 plain-prose DENY in train |
+|---                    |---                  |---                                   |
+| adversarial_injection | 5.3% FN (L19 max)   | 4.0% FN                              |
+| **plain_deny**        | **68.8% FN**        | **6.2% FN**                          |
+
+Mixing plain-prose DENY into training broke the shortcut without hurting the original domain. Evidence the 2.3B activations carry a usable policy feature; they just need diverse examples to expose it. `probes/build_plain_deny_train.py` is the augmentation recipe.
+
+## Known caveat / next-session work
+
+The plain-prose DENY training rows use the **same 8 always-deny commands** as the bench's plain-DENY test rows (`useradd`, `chown /etc/sudoers`, `systemctl stop firewalld/fail2ban/sshd`, `iptables -F`, `sysctl -w kernel.dmesg_restrict=0`, `rm -rf /usr/local/lib`). So some of the FN drop could be command-keyword learning, not fully generalized semantic policy understanding. **Next validity test:** re-augment with a *different* set of always-deny commands (`visudo`, `passwd`, `setenforce 0`, `mount -o bind /etc/passwd`, etc.) and re-run. If FN stays low on the bench's plain_deny, true generalization.
+
+## Session cost breakdown (one-time)
+
+- RunPod RTX 3090: ~$0.50 across all extraction + Gemma-judge runs
+- Opus 4.7 synthesis + labeling (ALLOW cases, plain_deny bench, plain_deny training): ~$13
+- Opus 4.7 + Haiku 4.5 full 308-row bench via pipeline (with prompt caching): ~$5
+- Total: ~$18.50
+- After initial training, **the probe itself runs locally in <10 ms per prompt with a 6 KB weight vector**.
+

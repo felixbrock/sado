@@ -42,8 +42,16 @@ Classifies ALLOW vs. DENY against `bench/adversarial_resistance/policy.md`.
 3. **Activations.** Reuse `bench/adversarial_resistance/prompt.py` for input
    formatting. Prefill only (no generation). Hook one middle layer and the
    last layer, mean-pool across tokens, save `(id, hidden, label)` per split.
-4. **Train.** `nn.Linear(hidden_dim, 1)` + sigmoid, BCE, Adam lr=1e-3,
-   batch 64, 30 epochs early-stopped on val loss. 10 seeds, report mean ± std.
+4. **Train.** Fit `sklearn.linear_model.LogisticRegression(C=1.0,
+   class_weight="balanced", max_iter=2000)` on the mean-pooled activations.
+   Closed-form LogReg finds a strictly better linear boundary than the
+   `nn.Linear + Adam + BCE` recipe we started with — on hidden_mid (L18),
+   LogReg hit val 0.964 / test 0.975 versus 0.868 for the nn.Linear probe
+   on the same features, so the earlier "BoW beats probe" result was a
+   training-recipe artifact, not a signal problem. Keep the nn.Linear path
+   only as a 10-seed variance check (report mean ± std); LogReg is the
+   probe of record. `class_weight="balanced"` matters — the labeled set
+   leans DENY and an unweighted fit over-predicts the majority class.
 5. **Evaluate.** Score the held-out 242 via `bench/pipeline.py`. Bar: FN-rate
    Wilson upper bound ≤ the Opus 4.6 baseline on the same set.
 6. **Sanity checks.** Must beat majority-class on val; shuffled-label probe

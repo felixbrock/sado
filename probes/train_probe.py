@@ -45,7 +45,10 @@ def train_one(
     d = X_tr.shape[1]
     model = nn.Linear(d, 1)
     opt = torch.optim.Adam(model.parameters(), lr=lr)
-    bce = nn.BCEWithLogitsLoss()
+    n_pos = int((y_tr == 1).sum().item())
+    n_neg = int((y_tr == 0).sum().item())
+    pos_weight = torch.tensor([n_neg / max(n_pos, 1)])
+    bce = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
 
     best_loss = float("inf")
     best_state = {k: v.clone() for k, v in model.state_dict().items()}
@@ -78,18 +81,16 @@ def train_one(
     return model, best_loss
 
 
-def compute_metrics(model: nn.Linear, X: torch.Tensor, y: torch.Tensor) -> dict:
-    model.eval()
-    with torch.no_grad():
-        preds = (model(X).squeeze(-1) > 0).int()
-    y = y.int()
-    acc = (preds == y).float().mean().item()
+def _metrics_from_preds(preds: np.ndarray, y: np.ndarray) -> dict:
+    preds = np.asarray(preds).astype(int)
+    y = np.asarray(y).astype(int)
+    acc = float((preds == y).mean())
     deny = y == 1
-    n_deny = int(deny.sum().item())
-    fn = int(((preds == 0) & deny).sum().item())
+    n_deny = int(deny.sum())
+    fn = int(((preds == 0) & deny).sum())
     allow = y == 0
-    n_allow = int(allow.sum().item())
-    fp = int(((preds == 1) & allow).sum().item())
+    n_allow = int(allow.sum())
+    fp = int(((preds == 1) & allow).sum())
     return {
         "acc": acc,
         "fn": fn,
@@ -99,7 +100,15 @@ def compute_metrics(model: nn.Linear, X: torch.Tensor, y: torch.Tensor) -> dict:
         "fp": fp,
         "n_allow": n_allow,
         "fp_rate": fp / max(n_allow, 1),
+        "fp_wilson_ub": wilson_upper(fp, n_allow),
     }
+
+
+def compute_metrics(model: nn.Linear, X: torch.Tensor, y: torch.Tensor) -> dict:
+    model.eval()
+    with torch.no_grad():
+        preds = (model(X).squeeze(-1) > 0).int().numpy()
+    return _metrics_from_preds(preds, y.numpy())
 
 
 def run_layer(
@@ -164,6 +173,25 @@ def _build_texts(splits: dict, labeled_path: Path, bench_path: Path) -> dict:
         "train": [text_for(i, labeled) for i in splits["train"]["ids"]],
         "val": [text_for(i, labeled) for i in splits["val"]["ids"]],
         "test": [text_for(i, bench) for i in splits["test"]["ids"]],
+    }
+
+
+def logreg_probe(splits: dict, layer_key: str) -> dict:
+    """Probe of record: sklearn LogReg with class_weight='balanced'."""
+    from sklearn.linear_model import LogisticRegression
+
+    X_tr = splits["train"][layer_key].float().numpy()
+    X_va = splits["val"][layer_key].float().numpy()
+    X_te = splits["test"][layer_key].float().numpy()
+    y_tr = splits["train"]["labels"].numpy()
+    y_va = splits["val"]["labels"].numpy()
+    y_te = splits["test"]["labels"].numpy()
+
+    clf = LogisticRegression(C=1.0, class_weight="balanced", max_iter=2000)
+    clf.fit(X_tr, y_tr)
+    return {
+        "val": _metrics_from_preds(clf.predict(X_va), y_va),
+        "test": _metrics_from_preds(clf.predict(X_te), y_te),
     }
 
 
@@ -250,7 +278,12 @@ def main() -> None:
     )
 
     for layer_key in ("hidden_mid", "hidden_last"):
-        print(f"\n=== Probe: {layer_key} ({args.seeds} seeds) ===")
+        print(f"\n=== Probe of record: LogReg on {layer_key} (class_weight=balanced) ===")
+        lr = logreg_probe(splits, layer_key)
+        print(f"val : acc={lr['val']['acc']:.3f}  FN={lr['val']['fn']}/{lr['val']['n_deny']} ({lr['val']['fn_rate']:.3f})  FP={lr['val']['fp']}/{lr['val']['n_allow']} ({lr['val']['fp_rate']:.3f})")
+        print(f"test: acc={lr['test']['acc']:.3f}  FN={lr['test']['fn']}/{lr['test']['n_deny']} ({lr['test']['fn_rate']:.3f}, Wilson UB {lr['test']['fn_wilson_ub']:.3f})  FP={lr['test']['fp']}/{lr['test']['n_allow']} ({lr['test']['fp_rate']:.3f}, Wilson UB {lr['test']['fp_wilson_ub']:.3f})")
+
+        print(f"\n--- nn.Linear variance check ({args.seeds} seeds, pos_weight balanced) ---")
         results, shuf = run_layer(splits, layer_key, args.seeds)
         s = summarize(results)
         print(f"val  acc       : {s['val_acc'][0]:.3f} +/- {s['val_acc'][1]:.3f}")

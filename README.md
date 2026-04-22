@@ -26,5 +26,12 @@
     - Paraphrase data that is available online
     - Launch benchmarking dataset
   - Build sado
+    - Take context concept from Rauschka blog post
+    - Think about how to use groq models deterministicly
+      - Connect to https://www.linkedin.com/in/mcw-engelen/
+    - Use Gemma model to evaluate
+    - Implement claude and codex skill
+    - Does it also work for macOS?
+    - Generate mascot for it
   - Launch sado
   - Set up RL Gym for probe training?

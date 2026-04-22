@@ -176,10 +176,21 @@ def _build_texts(splits: dict, labeled_path: Path, bench_path: Path) -> dict:
     }
 
 
-def sweep_layers_pools(splits: dict, top_k: int = 10) -> list[dict]:
-    """Fit a balanced-LogReg probe for each (layer, pool) combination on
-    hidden_all of shape (N, L, P, H). Rank by val acc. Return the full list
-    with test metrics filled in for the top_k val-ranked configs.
+def sweep_layers_pools(
+    splits: dict,
+    top_k: int = 10,
+    C_grid: tuple[float, ...] = (0.001, 0.01, 0.1, 1.0),
+) -> list[dict]:
+    """Fit a balanced-LogReg probe for each (layer, pool, C) combination on
+    hidden_all of shape (N, L, P, H). For each (layer, pool), pick the C with
+    best val acc; rank those winners. Return the full list with test metrics
+    filled in for the top_k val-ranked configs.
+
+    The C grid follows the ETHICS reproduction (arXiv:2601.11516 Appendix C
+    recipe, reproduced in ../probes-for-gemini), which found C=0.001 optimal
+    on a larger training set. Our 3k-row set is more overfitting-prone, so
+    stronger regularization is plausible here too. Solver is liblinear per
+    the ETHICS report's wall-clock note.
     """
     from sklearn.linear_model import LogisticRegression
 
@@ -198,14 +209,22 @@ def sweep_layers_pools(splits: dict, top_k: int = 10) -> list[dict]:
         for p_idx, p_name in enumerate(pool_modes):
             X_tr = H_tr[:, layer, p_idx, :]
             X_va = H_va[:, layer, p_idx, :]
-            clf = LogisticRegression(C=1.0, class_weight="balanced", max_iter=2000)
-            clf.fit(X_tr, y_tr)
+            best = None
+            for C in C_grid:
+                clf = LogisticRegression(
+                    C=C, class_weight="balanced", solver="liblinear", max_iter=2000
+                )
+                clf.fit(X_tr, y_tr)
+                val_m = _metrics_from_preds(clf.predict(X_va), y_va)
+                if best is None or val_m["acc"] > best["val"]["acc"]:
+                    best = {"C": C, "clf": clf, "val": val_m}
             configs.append(
                 {
                     "layer": layer,
                     "pool": p_name,
-                    "clf": clf,
-                    "val": _metrics_from_preds(clf.predict(X_va), y_va),
+                    "C": best["C"],
+                    "clf": best["clf"],
+                    "val": best["val"],
                 }
             )
 
@@ -411,13 +430,14 @@ def main() -> None:
         if "hidden_all" not in splits["train"]:
             print("\n--sweep requested but hidden_all not in train.pt; re-extract activations first.")
             return
-        print(f"\n=== Layer x Pool sweep (LogReg, class_weight=balanced) ===")
+        print(f"\n=== Layer x Pool x C sweep (LogReg, class_weight=balanced, liblinear) ===")
         configs = sweep_layers_pools(splits, top_k=10)
-        print(f"{'rank':>4}  {'layer':>5}  {'pool':>11}  {'val_acc':>7}  {'test_acc':>8}  {'test_fn':>7}  {'test_fp':>7}")
+        print(f"{'rank':>4}  {'layer':>5}  {'pool':>11}  {'C':>6}  {'val_acc':>7}  {'test_acc':>8}  {'test_fn':>7}  {'test_fp':>7}")
         for i, c in enumerate(configs[:10], start=1):
             t = c.get("test", {})
             print(
                 f"{i:>4}  {c['layer']:>5}  {c['pool']:>11}  "
+                f"{c['C']:>6.3f}  "
                 f"{c['val']['acc']:>7.3f}  "
                 f"{t.get('acc', float('nan')):>8.3f}  "
                 f"{t.get('fn_rate', float('nan')):>7.3f}  "

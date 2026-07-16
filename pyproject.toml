@@ -10,6 +10,9 @@ dependencies = [
 ]
 
 [dependency-groups]
+dev = [
+    "pytest>=8.0",
+]
 probes = [
     "torch>=2.4",
     "numpy>=1.26",

@@ -12,6 +12,7 @@ from collections.abc import Callable
 from .anthropic import AnthropicModel
 from .base import Model
 from .openai import OpenAIModel
+from .sado import SadoCascadeModel
 
 
 # name → zero-arg factory. Factories keep import-time side effects minimal —
@@ -21,6 +22,14 @@ REGISTRY: dict[str, Callable[[], Model]] = {
     "claude-opus-4-7": lambda: AnthropicModel("claude-opus-4-7", "claude-opus-4-7"),
     "claude-haiku-4-5": lambda: AnthropicModel("claude-haiku-4-5", "claude-haiku-4-5"),
     "gpt-5-4": lambda: OpenAIModel("gpt-5-4", "gpt-5.4"),
+    # sado cascade: deterministic rules first, LLM judge on the remainder.
+    # Suffix names the judge model that handles UNDECIDED rows.
+    "sado-opus-4-7": lambda: SadoCascadeModel("sado-opus-4-7", "claude-opus-4-7"),
+    "sado-haiku-4-5": lambda: SadoCascadeModel("sado-haiku-4-5", "claude-haiku-4-5"),
+    # CLI-backed cascade: judge runs via `claude -p` (Claude Code auth), the
+    # exact path the production hook takes. No API key required.
+    "sado-cli-opus-4-7": lambda: SadoCascadeModel("sado-cli-opus-4-7", "claude-opus-4-7", backend="cli"),
+    "sado-cli-haiku-4-5": lambda: SadoCascadeModel("sado-cli-haiku-4-5", "claude-haiku-4-5", backend="cli"),
 }
 
 
